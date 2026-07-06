@@ -1251,9 +1251,76 @@ async function loadResult(taskId, jump) {
   }
 }
 
-$("htmlReportBtn").onclick = () => { if (currentTaskId) window.open(`/api/review/report/${currentTaskId}?fmt=html`, "_blank"); };
-$("jsonReportBtn").onclick = () => { if (currentTaskId) window.open(`/api/review/report/${currentTaskId}?fmt=json`, "_blank"); };
+$("htmlReportBtn").onclick = () => openClientReport();
+$("jsonReportBtn").onclick = () => openClientJson();
 $("issuesBtn").onclick = () => { if (currentTaskId) showPage("issues"); };
+
+function openClientReport() {
+  if (!lastResult) return alert("报告数据还未加载完成");
+  const html = buildClientReportHtml(lastResult);
+  openTextBlob(html, "text/html;charset=utf-8", `review-${currentTaskId || "report"}.html`);
+}
+
+function openClientJson() {
+  if (!lastResult) return alert("JSON 数据还未加载完成");
+  const text = JSON.stringify(lastResult.result || lastResult, null, 2);
+  openTextBlob(text, "application/json;charset=utf-8", `review-${currentTaskId || "report"}.json`);
+}
+
+function openTextBlob(text, type, filename) {
+  const blob = new Blob([text], {type});
+  const url = URL.createObjectURL(blob);
+  const win = window.open(url, "_blank");
+  if (!win) {
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.click();
+  }
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function buildClientReportHtml(payload) {
+  const task = payload.task || {};
+  const summary = payload.summary || {};
+  const issues = summary.issues || [];
+  const rows = issues.slice(0, 300).map(item =>
+    `<tr><td>${escapeHtml(item.file)}</td><td>${escapeHtml(item.category)}</td><td>${escapeHtml(item.severity)}</td><td>${escapeHtml(item.message)}</td></tr>`
+  ).join("") || `<tr><td colspan="4">暂无问题</td></tr>`;
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>毕业设计智能审查报告</title>
+<style>
+body{font-family:Arial,"Microsoft YaHei",sans-serif;margin:0;background:#f5f7fb;color:#111827}
+main{max-width:980px;margin:0 auto;padding:24px}
+.hero{background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:20px;margin-bottom:16px}
+h1{font-size:22px;margin:0 0 12px}.score{font-size:42px;font-weight:800;color:#2563eb}
+.meta{color:#4b5563;line-height:1.8}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e5e7eb}
+th,td{padding:10px;border-bottom:1px solid #e5e7eb;text-align:left;font-size:14px;vertical-align:top}
+th{background:#f9fafb}
+</style>
+</head>
+<body>
+<main>
+<section class="hero">
+<h1>毕业设计智能审查报告</h1>
+<div class="meta">任务编号：${escapeHtml(task.id || currentTaskId || "-")}</div>
+<div class="meta">审查模式：${escapeHtml(task.mode || "-")}；文件数：${escapeHtml(summary.file_count ?? task.file_count ?? "-")}；问题数：${escapeHtml(summary.issue_count ?? task.issue_count ?? "-")}</div>
+<div class="score">${escapeHtml(summary.score ?? task.score ?? "--")}</div>
+<div class="meta">等级：${escapeHtml(summary.grade || task.grade || "待评估")}</div>
+</section>
+<table>
+<thead><tr><th>文件</th><th>类型</th><th>级别</th><th>问题说明</th></tr></thead>
+<tbody>${rows}</tbody>
+</table>
+</main>
+</body>
+</html>`;
+}
 
 async function loadHistory() {
   const [historyRes, statsRes] = await Promise.all([fetch("/api/history"), fetch("/api/stats")]);
