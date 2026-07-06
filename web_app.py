@@ -678,6 +678,7 @@ def text_response(handler: BaseHTTPRequestHandler, status: int, body: str, conte
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
     handler.wfile.write(data)
 
