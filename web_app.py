@@ -11,6 +11,7 @@ frontend build pipeline or web framework is introduced.
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import html
 import io
@@ -296,6 +297,18 @@ def safe_extract_zip(zip_path: Path, target_dir: Path) -> list[str]:
                 out.write(src.read())
             extracted.append(str(target.relative_to(target_dir)))
     return extracted
+
+
+def save_review_upload(upload_dir: Path, filename: str, content: bytes) -> list[str]:
+    filename = safe_filename(filename)
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_EXTENSIONS:
+        return []
+    target = upload_dir / filename
+    target.write_bytes(content)
+    if ext == ".zip":
+        return safe_extract_zip(target, upload_dir)
+    return [filename]
 
 
 def normalize_formats(value: str | None) -> list[str]:
@@ -732,6 +745,35 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 return
             upload_dir = UPLOAD_DIR / uuid.uuid4().hex[:12]
             upload_dir.mkdir(parents=True, exist_ok=True)
+            content_type = self.headers.get("Content-Type", "")
+            if content_type.startswith("application/json"):
+                payload = self.read_json_body()
+                mode = payload.get("mode", "code")
+                formats = normalize_formats(payload.get("formats", ",".join(DEFAULT_FORMATS)))
+                mode_error = validate_review_mode(mode)
+                if mode_error:
+                    json_response(self, HTTPStatus.BAD_REQUEST, {"ok": False, "error": mode_error})
+                    return
+                saved = []
+                for item in payload.get("files", []):
+                    filename = item.get("name", "")
+                    data = item.get("data", "")
+                    if not filename or not data:
+                        continue
+                    try:
+                        content = base64.b64decode(data, validate=True)
+                    except Exception:
+                        json_response(self, HTTPStatus.BAD_REQUEST, {"ok": False, "error": f"文件编码无效: {filename}"})
+                        return
+                    saved.extend(save_review_upload(upload_dir, filename, content))
+                if not saved:
+                    json_response(self, HTTPStatus.BAD_REQUEST, {"ok": False, "error": "未收到可审查文件"})
+                    return
+                task = create_task(upload_dir, mode, formats, saved, upload_dir)
+                start_task_worker(task["id"])
+                json_response(self, HTTPStatus.ACCEPTED, {"ok": True, "task_id": task["id"], "status": "queued", "files": saved})
+                return
+
             form = cgi.FieldStorage(
                 fp=self.rfile,
                 headers=self.headers,
@@ -758,14 +800,7 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 ext = Path(filename).suffix.lower()
                 if ext not in ALLOWED_EXTENSIONS:
                     continue
-                target = upload_dir / filename
-                with target.open("wb") as out:
-                    out.write(field.file.read())
-                if ext == ".zip":
-                    extracted = safe_extract_zip(target, upload_dir)
-                    saved.extend(extracted)
-                else:
-                    saved.append(filename)
+                saved.extend(save_review_upload(upload_dir, filename, field.file.read()))
             if not saved:
                 json_response(self, HTTPStatus.BAD_REQUEST, {"ok": False, "error": "未收到可审查文件"})
                 return
@@ -1126,26 +1161,55 @@ function connectSse(taskId) {
 async function uploadReview() {
   const files = $("files").files;
   if (!files.length) return alert("请选择要审查的文件");
-  const form = new FormData();
-  for (const file of files) form.append("files", file);
-  form.append("mode", currentMode);
-  form.append("formats", $("formats").value);
-  const res = await fetch("/api/review/upload", { method:"POST", body:form });
-  const payload = await res.json();
-  if (!payload.ok) return alert(payload.error || "提交失败");
-  connectSse(payload.task_id);
+  try {
+    const encodedFiles = [];
+    for (const file of files) encodedFiles.push(await readFileAsBase64(file));
+    const res = await fetch("/api/review/upload", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:currentMode, formats:$("formats").value, files:encodedFiles})
+    });
+    const payload = await parseResponse(res);
+    if (!payload.ok) return alert(payload.error || "提交失败");
+    connectSse(payload.task_id);
+  } catch (error) {
+    alert(error.message || "上传失败");
+  }
 }
 
 async function pathReview() {
   const archiveDir = $("archiveDir").value.trim();
   if (!archiveDir) return alert("请填写服务器目录");
-  const res = await fetch("/api/review/path", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({archive_dir:archiveDir, mode:currentMode, formats:$("formats").value}) });
-  const payload = await res.json();
-  if (!payload.ok) return alert(payload.error || "提交失败");
-  connectSse(payload.task_id);
+  try {
+    const res = await fetch("/api/review/path", { method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({archive_dir:archiveDir, mode:currentMode, formats:$("formats").value}) });
+    const payload = await parseResponse(res);
+    if (!payload.ok) return alert(payload.error || "提交失败");
+    connectSse(payload.task_id);
+  } catch (error) {
+    alert(error.message || "提交失败");
+  }
 }
 $("uploadBtn").onclick = uploadReview;
 $("pathBtn").onclick = pathReview;
+
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result || "");
+      resolve({name:file.name, type:file.type, size:file.size, data:value.split(",").pop()});
+    };
+    reader.onerror = () => reject(new Error(`读取文件失败：${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function parseResponse(res) {
+  const contentType = res.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) return res.json();
+  const text = await res.text();
+  throw new Error(text || `请求失败：${res.status}`);
+}
 
 async function loadResult(taskId, jump) {
   const res = await fetch(`/api/review/result/${taskId}`);
