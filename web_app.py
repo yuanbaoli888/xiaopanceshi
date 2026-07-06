@@ -1108,6 +1108,7 @@ INDEX_HTML = r"""<!doctype html>
 let currentMode = "code";
 let currentTaskId = localStorage.getItem("currentTaskId") || "";
 let lastResult = null;
+let resultPollTimer = null;
 const $ = (id) => document.getElementById(id);
 const steps = ["文档提取","单文档评分","跨文档交叉审查","GB/T 7714 校验","格式规范检查","PPT 分析","安全护栏","报告生成"];
 
@@ -1146,6 +1147,7 @@ function setSteps(events) {
 function connectSse(taskId) {
   currentTaskId = taskId; localStorage.setItem("currentTaskId", taskId);
   showPage("progress");
+  startResultPolling(taskId);
   const source = new EventSource(`/api/review/status/${taskId}`);
   source.onmessage = (message) => {
     const payload = JSON.parse(message.data);
@@ -1153,10 +1155,21 @@ function connectSse(taskId) {
     loadResult(taskId, false);
     if (payload.task && ["done","failed"].includes(payload.task.status)) {
       source.close();
+      stopResultPolling();
       loadResult(taskId, true);
     }
   };
   source.onerror = () => source.close();
+}
+
+function startResultPolling(taskId) {
+  stopResultPolling();
+  resultPollTimer = setInterval(() => loadResult(taskId, true), 2000);
+}
+
+function stopResultPolling() {
+  if (resultPollTimer) clearInterval(resultPollTimer);
+  resultPollTimer = null;
 }
 
 async function uploadReview() {
@@ -1228,8 +1241,14 @@ async function loadResult(taskId, jump) {
   $("logsPanel").textContent = payload.logs || payload.error || "";
   const issues = summary.issues || [];
   $("issuesPanel").innerHTML = issues.length ? issues.map(item => `<div class="card issue"><b>${escapeHtml(item.file)}</b><div>${escapeHtml(item.message)}</div><div class="muted">${escapeHtml(item.category)} · ${escapeHtml(item.severity)} ${item.evidence ? "· " + escapeHtml(item.evidence) : ""}</div></div>`).join("") : `<div class="card muted">暂无问题</div>`;
-  if (jump && task.status === "done") showPage("results");
-  if (task.status === "failed") showPage("issues");
+  if (task.status === "done") {
+    stopResultPolling();
+    if (jump || $("page-progress").classList.contains("active")) showPage("results");
+  }
+  if (task.status === "failed") {
+    stopResultPolling();
+    showPage("issues");
+  }
 }
 
 $("htmlReportBtn").onclick = () => { if (currentTaskId) window.open(`/api/review/report/${currentTaskId}?fmt=html`, "_blank"); };
@@ -1264,7 +1283,7 @@ fetch("/api/health").then(r => r.json()).then(data => {
   }
 }).catch(() => $("health").textContent = "离线");
 loadHistory();
-if (currentTaskId) loadResult(currentTaskId, false);
+if (currentTaskId) loadResult(currentTaskId, true);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 </script>
 </body>
